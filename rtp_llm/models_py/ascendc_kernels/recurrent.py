@@ -1,0 +1,236 @@
+"""Device dispatch for Qwen3.5 recurrent Gated-DeltaNet decode."""
+
+from __future__ import annotations
+
+from typing import Optional
+
+import torch
+
+from rtp_llm.models_py.ascendc_kernels.linear_attention import l2norm_fwd
+
+_NPU_DEVICE_TYPES = frozenset(("npu", "privateuseone"))
+
+
+def _is_npu_tensor(tensor: torch.Tensor) -> bool:
+    return tensor.device.type in _NPU_DEVICE_TYPES
+
+
+def _get_ascendc_ops():
+    try:
+        from fla_npu.ops import ascendc
+    except ImportError as exc:  # pragma: no cover - depends on the NPU image
+        raise RuntimeError(
+            "Qwen3.5 recurrent decode on Ascend requires the SoC-specific "
+            "flash-linear-attention-npu wheel."
+        ) from exc
+    if not hasattr(ascendc, "npu_recurrent_gated_delta_rule"):
+        raise RuntimeError(
+            "The installed FLA-NPU wheel does not export "
+            "npu_recurrent_gated_delta_rule; install the commit verified by "
+            "the Qwen3.5 migration guide."
+        )
+    return ascendc
+
+
+def _to_int_list(tensor: torch.Tensor) -> list[int]:
+    return [int(value) for value in tensor.detach().cpu().tolist()]
+
+
+def _resolve_state_pages(
+    block_map: Optional[torch.Tensor],
+    sequence_lengths: Optional[torch.Tensor],
+    batch: int,
+    token_count: int,
+    seq_size_per_block: int,
+) -> tuple[list[int], list[list[int]]]:
+    """Return the read page and speculative write pages for each sequence.
+
+    ``sequence_lengths`` is RTP's ``sequence_lengths_plus_1_d``: its value is
+    the total sequence length after the first token in this invocation.  RTP's
+    continuous-batching contract reads the state before that token from
+    ``(length - 2) // block_size`` and stores every speculative token in a
+    consecutive block-map entry beginning at ``(length - 1) // block_size``.
+    The latter is intentionally *not* ordinary token-to-block placement.
+    """
+    if seq_size_per_block <= 0:
+        raise ValueError("seq_size_per_block must be positive")
+    if block_map is None:
+        pages = [[batch_idx] * token_count for batch_idx in range(batch)]
+        return list(range(batch)), pages
+    if block_map.ndim != 2 or block_map.shape[0] != batch:
+        raise ValueError("block_map must have shape [batch, max_blocks]")
+    mapping = block_map.detach().cpu().tolist()
+    first_lengths = (
+        _to_int_list(sequence_lengths) if sequence_lengths is not None else [1] * batch
+    )
+    if len(first_lengths) != batch:
+        raise ValueError("sequence_lengths must contain one value per batch")
+    read_pages: list[int] = []
+    write_pages: list[list[int]] = []
+    for batch_idx, first_length in enumerate(first_lengths):
+        if first_length <= 0:
+            raise ValueError("decode sequence lengths must be positive")
+        # The CUDA reference uses cal_block_idx(length - 1) for the load and
+        # cal_block_idx(length) + token_idx for the writes, where
+        # cal_block_idx(x) == (x - 1) // block_size.
+        read_block_pos = max(first_length - 2, 0) // seq_size_per_block
+        write_block_start = (first_length - 1) // seq_size_per_block
+        if read_block_pos >= len(mapping[batch_idx]):
+            raise ValueError("block_map does not cover the decode read position")
+        read_page = int(mapping[batch_idx][read_block_pos])
+        if read_page <= 0:
+            raise ValueError(
+                "non-positive decode state pages are not supported on Ascend yet"
+            )
+        read_pages.append(read_page)
+
+        batch_pages: list[int] = []
+        for token_idx in range(token_count):
+            block_pos = write_block_start + token_idx
+            if block_pos >= len(mapping[batch_idx]):
+                raise ValueError("block_map does not cover the decode write position")
+            page = int(mapping[batch_idx][block_pos])
+            if page <= 0:
+                raise ValueError(
+                    "non-positive decode state pages are not supported on Ascend yet"
+                )
+            batch_pages.append(page)
+        write_pages.append(batch_pages)
+    return read_pages, write_pages
+
+
+def _seed_first_write_pages(
+    state: torch.Tensor,
+    read_pages: list[int],
+    write_pages: list[list[int]],
+) -> None:
+    for batch_idx, batch_pages in enumerate(write_pages):
+        if not batch_pages:
+            continue
+        source = read_pages[batch_idx]
+        destination = batch_pages[0]
+        if source != destination:
+            state[destination].copy_(state[source])
+
+
+def fused_recurrent_gated_delta_rule(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor = None,
+    scale: float = None,
+    initial_state: torch.Tensor = None,
+    inplace_final_state: bool = True,
+    cu_seqlens: Optional[torch.LongTensor] = None,
+    block_map: Optional[torch.Tensor] = None,
+    seq_size_per_block=1,
+    sequence_lengths: Optional[torch.Tensor] = None,
+    use_qk_l2norm_in_kernel: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if not _is_npu_tensor(q):
+        from rtp_llm.models_py.triton_kernels.fla.fused_recurrent import (
+            fused_recurrent_gated_delta_rule as triton_fused_recurrent,
+        )
+
+        return triton_fused_recurrent(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            scale=scale,
+            initial_state=initial_state,
+            inplace_final_state=inplace_final_state,
+            cu_seqlens=cu_seqlens,
+            block_map=block_map,
+            seq_size_per_block=seq_size_per_block,
+            sequence_lengths=sequence_lengths,
+            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+        )
+
+    if cu_seqlens is not None:
+        raise NotImplementedError(
+            "cu_seqlens is a prefill interface; Ascend recurrent decode uses "
+            "block_map and sequence_lengths"
+        )
+    if initial_state is None:
+        raise ValueError("initial_state is required for recurrent decode")
+    if not inplace_final_state:
+        raise NotImplementedError(
+            "Ascend recurrent decode currently requires inplace_final_state=True"
+        )
+    if initial_state.dtype != torch.bfloat16:
+        raise TypeError("FLA-NPU recurrent state currently requires bfloat16")
+    if q.ndim != 4 or k.shape != q.shape or v.ndim != 4:
+        raise ValueError("q/k/v must have shapes [B,T,H,D]")
+    batch, token_count = q.shape[:2]
+    if v.shape[:2] != (batch, token_count):
+        raise ValueError("q/k/v must share batch and token dimensions")
+    if beta is not None and beta.shape != v.shape[:-1]:
+        raise ValueError("beta must have shape [B,T,HV]")
+    if g.shape != v.shape[:-1]:
+        raise ValueError("g must have shape [B,T,HV]")
+    if initial_state.ndim != 4 or initial_state.shape[1:] != (
+        v.shape[2],
+        v.shape[3],
+        q.shape[3],
+    ):
+        raise ValueError("initial_state must have shape [pages,HV,DV,DK]")
+    if initial_state.stride(-1) != 1:
+        raise ValueError("initial_state DK dimension must be contiguous")
+    if token_count > 8:
+        raise ValueError(
+            "FLA-NPU recurrent decode supports at most 8 tokens per sequence"
+        )
+    if beta is None:
+        beta = torch.ones_like(v[..., 0])
+    if scale is None:
+        scale = k.shape[-1] ** -0.5
+    elif scale <= 0:
+        raise ValueError("scale must be positive")
+    if use_qk_l2norm_in_kernel:
+        q = l2norm_fwd(q)
+        k = l2norm_fwd(k)
+
+    read_pages, write_pages = _resolve_state_pages(
+        block_map,
+        sequence_lengths,
+        batch,
+        token_count,
+        int(seq_size_per_block),
+    )
+    state = initial_state
+    if token_count == 0:
+        return v.new_empty(v.shape), state
+
+    ascendc = _get_ascendc_ops()
+
+    # The operator keeps the recurrence in FP32 across all tokens and uses one
+    # state index per token for the BF16 snapshots.  Seed only the first output
+    # page from the previously committed page; later pages are written by the
+    # same launch, avoiding a BF16 reload between speculative tokens.
+    _seed_first_write_pages(state, read_pages, write_pages)
+    state_indices = [page for batch_pages in write_pages for page in batch_pages]
+    actual_seq_lengths = torch.tensor(
+        [0] + [token_count] * batch,
+        dtype=torch.int32,
+        device=q.device,
+    )
+    ssm_state_indices = torch.tensor(state_indices, dtype=torch.int32, device=q.device)
+    result = ascendc.npu_recurrent_gated_delta_rule(
+        q.reshape(-1, *q.shape[2:]).to(torch.bfloat16),
+        k.reshape(-1, *k.shape[2:]).to(torch.bfloat16),
+        v.reshape(-1, *v.shape[2:]).to(torch.bfloat16),
+        state,
+        beta=beta.reshape(-1, beta.shape[-1]).to(torch.bfloat16),
+        scale=float(scale),
+        actual_seq_lengths=actual_seq_lengths,
+        ssm_state_indices=ssm_state_indices,
+        g=g.reshape(-1, g.shape[-1]).float(),
+    )
+    out = result[0] if isinstance(result, (tuple, list)) else result
+    return out.reshape(batch, token_count, *out.shape[1:]).to(q.dtype), state
+
+
+__all__ = ["fused_recurrent_gated_delta_rule"]

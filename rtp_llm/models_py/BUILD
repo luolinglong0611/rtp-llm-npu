@@ -7,6 +7,18 @@ py_library(
     ]),
 )
 
+py_library(
+    name = "ascendc_kernels",
+    srcs = glob([
+        "ascendc_kernels/*.py",
+    ]),
+    deps = [
+        "//rtp_llm:torch",
+        "//rtp_llm/models_py/triton_kernels:triton_kernels",
+    ],
+    visibility = ["//visibility:public"],
+)
+
 # flashinfer-python is only available for CUDA12
 flashinfer = ["flashinfer-python"]
 deep = ["deep_gemm", "deep_ep"]
@@ -118,6 +130,7 @@ py_library(
         "model_desc/cuda_graph/*.py"
     ]),
     deps = [
+        ":ascendc_kernels",
         ":utils",
         ":modules",
         ":kernels",
