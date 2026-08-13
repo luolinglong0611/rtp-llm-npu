@@ -3,7 +3,6 @@ import importlib.util
 import sys
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 from unittest import mock
 
 CAUSAL_CONV1D_PATH = Path(__file__).resolve().parents[1] / "causal_conv1d.py"
@@ -102,8 +101,6 @@ class TestCausalConv1dNpuAdapter(unittest.TestCase):
             return kwargs["x"]
 
         with mock.patch.object(
-            self.module, "_is_npu_tensor", return_value=True
-        ), mock.patch.object(
             self.module,
             "_load_npu_causal_conv1d",
             return_value=fake_npu_causal_conv1d,
@@ -178,8 +175,6 @@ class TestCausalConv1dNpuAdapter(unittest.TestCase):
             return kwargs["x"] + 100
 
         with mock.patch.object(
-            self.module, "_is_npu_tensor", return_value=True
-        ), mock.patch.object(
             self.module,
             "_load_npu_causal_conv1d",
             return_value=fake_npu_causal_conv1d,
@@ -210,45 +205,6 @@ class TestCausalConv1dNpuAdapter(unittest.TestCase):
         torch.testing.assert_close(
             conv_state[5],
             torch.tensor([[3, 20, 21], [13, 30, 31]], dtype=torch.float32),
-        )
-
-    def test_non_npu_prefill_is_forwarded_unchanged(self):
-        sentinel = object()
-        legacy_call = mock.Mock(return_value=sentinel)
-        legacy_impl = SimpleNamespace(causal_conv1d_fn=legacy_call)
-        x = torch.zeros(2, 1)
-        weight = torch.zeros(2, 4)
-        query_start_loc = torch.tensor([0, 1], dtype=torch.int32)
-        prefix_lengths = torch.tensor([0], dtype=torch.int32)
-
-        with mock.patch.object(
-            self.module, "_load_triton_impl", return_value=legacy_impl
-        ):
-            actual = self.module.causal_conv1d_fn(
-                x,
-                weight,
-                None,
-                None,
-                query_start_loc,
-                None,
-                prefix_lengths,
-                16,
-            )
-
-        self.assertIs(actual, sentinel)
-        legacy_call.assert_called_once_with(
-            x=x,
-            weight=weight,
-            bias=None,
-            conv_states=None,
-            query_start_loc=query_start_loc,
-            block_map=None,
-            prefix_lengths=prefix_lengths,
-            seq_size_per_block=16,
-            activation="silu",
-            pad_slot_id=-1,
-            metadata=None,
-            validate_data=False,
         )
 
 

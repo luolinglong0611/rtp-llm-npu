@@ -1,10 +1,7 @@
-"""Device-dispatched Qwen3.5 chunked linear-attention operators.
+"""Ascend Qwen3.5 chunked linear-attention operators.
 
 The public functions in this module intentionally match the existing RTP-LLM
-Triton interfaces.  CUDA/ROCm implementations are imported lazily, while NPU
-inputs are routed to the operators shipped by ``flash-linear-attention-npu``.
-Keeping both imports lazy is important: the Ascend Bazel configuration does not
-provide the CUDA Triton package, and CUDA images do not install ``fla_npu``.
+Triton interfaces and route inputs to ``flash-linear-attention-npu``.
 """
 
 from __future__ import annotations
@@ -14,12 +11,7 @@ from typing import Optional
 
 import torch
 
-_NPU_DEVICE_TYPES = frozenset(("npu", "privateuseone"))
 _CHUNK_SIZE = 64
-
-
-def _is_npu_tensor(tensor: torch.Tensor) -> bool:
-    return tensor.device.type in _NPU_DEVICE_TYPES
 
 
 def _get_ascendc_ops():
@@ -107,13 +99,6 @@ def l2norm_fwd(
     output_dtype: Optional[torch.dtype] = None,
 ) -> torch.Tensor:
     """L2-normalize the last dimension while preserving RTP's return type."""
-    if not _is_npu_tensor(x):
-        from rtp_llm.models_py.triton_kernels.fla.l2norm import (
-            l2norm_fwd as triton_l2norm_fwd,
-        )
-
-        return triton_l2norm_fwd(x, eps=eps, output_dtype=output_dtype)
-
     # The migration guide selects FLA's Triton-for-Ascend implementation.  A
     # few deployment images intentionally ship only the AscendC wheel, so keep
     # a mathematically equivalent torch_npu path for that packaging variant.
@@ -139,22 +124,6 @@ def chunk_local_cumsum(
     output_dtype: Optional[torch.dtype] = torch.float,
     **kwargs,
 ) -> torch.Tensor:
-    if not _is_npu_tensor(g):
-        from rtp_llm.models_py.triton_kernels.fla.cumsum import (
-            chunk_local_cumsum as triton_chunk_local_cumsum,
-        )
-
-        return triton_chunk_local_cumsum(
-            g,
-            chunk_size,
-            reverse=reverse,
-            scale=scale,
-            cu_seqlens=cu_seqlens,
-            head_first=head_first,
-            output_dtype=output_dtype,
-            **kwargs,
-        )
-
     if g.ndim != 3:
         raise ValueError("FLA-NPU chunk_local_cumsum currently supports scalar gates")
     g_head_first = g.contiguous() if head_first else g.transpose(1, 2).contiguous()
@@ -184,20 +153,6 @@ def chunk_scaled_dot_kkt_fwd(
     chunk_size: int = 64,
     output_dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
-    if not _is_npu_tensor(k):
-        from rtp_llm.models_py.triton_kernels.fla.chunk_scaled_dot_kkt import (
-            chunk_scaled_dot_kkt_fwd as triton_chunk_scaled_dot_kkt_fwd,
-        )
-
-        return triton_chunk_scaled_dot_kkt_fwd(
-            k,
-            beta,
-            g_cumsum=g_cumsum,
-            cu_seqlens=cu_seqlens,
-            chunk_size=chunk_size,
-            output_dtype=output_dtype,
-        )
-
     if k.ndim != 4 or beta.ndim != 3:
         raise ValueError("k and beta must use BSND/BST layouts")
     batch, seqlen, key_heads, _ = k.shape
@@ -243,13 +198,6 @@ def solve_tril(
     cu_seqlens: Optional[torch.Tensor] = None,
     output_dtype: torch.dtype = torch.float,
 ) -> torch.Tensor:
-    if not _is_npu_tensor(A):
-        from rtp_llm.models_py.triton_kernels.fla.solve_tril import (
-            solve_tril as triton_solve_tril,
-        )
-
-        return triton_solve_tril(A, cu_seqlens=cu_seqlens, output_dtype=output_dtype)
-
     batch, seqlen, _, chunk_size = A.shape
     cu = _canonical_cu_seqlens(cu_seqlens, batch, seqlen)
     chunk_indices = _prepare_chunk_indices(cu, chunk_size)
@@ -272,13 +220,6 @@ def recompute_w_u_fwd(
     A: torch.Tensor,
     cu_seqlens: Optional[torch.LongTensor],
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    if not _is_npu_tensor(k):
-        from rtp_llm.models_py.triton_kernels.fla.wy_fast import (
-            recompute_w_u_fwd as triton_recompute_w_u_fwd,
-        )
-
-        return triton_recompute_w_u_fwd(k, v, beta, g_cumsum, A, cu_seqlens)
-
     batch, seqlen = k.shape[:2]
     chunk_size = A.shape[-1]
     cu = _canonical_cu_seqlens(cu_seqlens, batch, seqlen)
@@ -312,24 +253,6 @@ def chunk_gated_delta_rule_fwd_h(
     save_new_value: bool = True,
     cu_seqlens: Optional[torch.LongTensor] = None,
 ):
-    if not _is_npu_tensor(k):
-        from rtp_llm.models_py.triton_kernels.fla.chunk_delta_h import (
-            chunk_gated_delta_rule_fwd_h as triton_chunk_gated_delta_rule_fwd_h,
-        )
-
-        return triton_chunk_gated_delta_rule_fwd_h(
-            k,
-            w,
-            u,
-            g=g,
-            gk=gk,
-            initial_state=initial_state,
-            output_final_state=output_final_state,
-            chunk_size=chunk_size,
-            save_new_value=save_new_value,
-            cu_seqlens=cu_seqlens,
-        )
-
     if gk is not None:
         raise NotImplementedError("FLA-NPU fwd_h does not support gk")
     batch, seqlen, _, key_dim = k.shape
@@ -383,22 +306,6 @@ def chunk_fwd_o(
     cu_seqlens: Optional[torch.LongTensor] = None,
     chunk_size: int = 64,
 ) -> torch.Tensor:
-    if not _is_npu_tensor(q):
-        from rtp_llm.models_py.triton_kernels.fla.chunk_o import (
-            chunk_fwd_o as triton_chunk_fwd_o,
-        )
-
-        return triton_chunk_fwd_o(
-            q,
-            k,
-            v,
-            h,
-            g=g,
-            scale=scale,
-            cu_seqlens=cu_seqlens,
-            chunk_size=chunk_size,
-        )
-
     batch, seqlen = q.shape[:2]
     value_heads = v.shape[-2]
     effective_chunk_size = min(chunk_size, max(16, _next_power_of_two(seqlen)))
@@ -438,27 +345,8 @@ def chunk_gated_delta_rule(
     use_qk_l2norm_in_kernel: bool = False,
 ):
     """Run the complete Qwen3.5 prefill Gated-DeltaNet pipeline."""
-    if not _is_npu_tensor(q):
-        from rtp_llm.models_py.triton_kernels.fla.chunk import (
-            chunk_gated_delta_rule as triton_chunk_gated_delta_rule,
-        )
-
-        return triton_chunk_gated_delta_rule(
-            q,
-            k,
-            v,
-            g,
-            beta,
-            scale=scale,
-            initial_state=initial_state,
-            output_final_state=output_final_state,
-            cu_seqlens=cu_seqlens,
-            head_first=head_first,
-            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
-        )
-
     if head_first:
-        raise DeprecationWarning(
+        raise NotImplementedError(
             "head_first=True is not supported by the RTP Qwen3.5 interface"
         )
     if q.dtype != k.dtype or q.dtype != v.dtype:

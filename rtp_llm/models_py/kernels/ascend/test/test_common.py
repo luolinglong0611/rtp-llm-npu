@@ -2,8 +2,6 @@ import ast
 import importlib.util
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
-from unittest import mock
 
 COMMON_PATH = Path(__file__).resolve().parents[1] / "common.py"
 
@@ -16,52 +14,10 @@ class TestCommonWithoutRuntimeDependencies(unittest.TestCase):
     def test_module_is_valid_python(self):
         compile(_source_tree(), str(COMMON_PATH), "exec")
 
-    def test_triton_implementations_are_not_imported_at_module_load(self):
-        eager_imports = [
-            node
-            for node in _source_tree().body
-            if isinstance(node, (ast.Import, ast.ImportFrom))
-        ]
-        imported_modules = []
-        for node in eager_imports:
-            if isinstance(node, ast.Import):
-                imported_modules.extend(alias.name for alias in node.names)
-            else:
-                imported_modules.append(node.module or "")
-
-        self.assertFalse(
-            any("triton" in module for module in imported_modules),
-            imported_modules,
-        )
-
-    def test_npu_dispatch_accepts_both_pytorch_device_names(self):
-        tree = _source_tree()
-        dispatch_nodes = [
-            node
-            for node in tree.body
-            if (
-                isinstance(node, ast.Assign)
-                and any(
-                    isinstance(target, ast.Name) and target.id == "_NPU_DEVICE_TYPES"
-                    for target in node.targets
-                )
-            )
-            or (isinstance(node, ast.FunctionDef) and node.name == "_is_npu_tensor")
-        ]
-        namespace = {}
-        dispatch_module = ast.fix_missing_locations(
-            ast.Module(body=dispatch_nodes, type_ignores=[])
-        )
-        exec(compile(dispatch_module, str(COMMON_PATH), "exec"), namespace)
-        is_npu_tensor = namespace["_is_npu_tensor"]
-
-        fake_tensor = lambda device_type: SimpleNamespace(
-            device=SimpleNamespace(type=device_type)
-        )
-        self.assertTrue(is_npu_tensor(fake_tensor("npu")))
-        self.assertTrue(is_npu_tensor(fake_tensor("privateuseone")))
-        self.assertFalse(is_npu_tensor(fake_tensor("cuda")))
-        self.assertFalse(is_npu_tensor(fake_tensor("cpu")))
+    def test_module_is_ascend_only(self):
+        source = COMMON_PATH.read_text(encoding="utf-8")
+        self.assertNotIn("triton", source)
+        self.assertNotIn("_is_npu_tensor", source)
 
 
 try:
@@ -90,10 +46,9 @@ class TestCommonTorchReference(unittest.TestCase):
         beta = 0.75
         threshold = 12.0
 
-        with mock.patch.object(self.common, "_is_npu_tensor", return_value=True):
-            actual_g, actual_beta = self.common.fused_gdn_gating(
-                A_log, a, b, dt_bias, beta=beta, threshold=threshold
-            )
+        actual_g, actual_beta = self.common.fused_gdn_gating(
+            A_log, a, b, dt_bias, beta=beta, threshold=threshold
+        )
 
         expected_g = -torch.exp(A_log.float()) * F.softplus(
             a.float() + dt_bias.float(), beta=beta, threshold=threshold
@@ -113,8 +68,7 @@ class TestCommonTorchReference(unittest.TestCase):
             weight, bias=bias, group_size=4, eps=1e-5, activation="silu"
         )
 
-        with mock.patch.object(self.common, "_is_npu_tensor", return_value=True):
-            actual = module(x, gate)
+        actual = module(x, gate)
 
         grouped_x = x.float().reshape(2, 2, 4)
         variance = grouped_x.pow(2).mean(dim=-1, keepdim=True)
@@ -129,8 +83,7 @@ class TestCommonTorchReference(unittest.TestCase):
         weight = torch.randn(6, dtype=torch.float32)
         module = self.common.RmsNormGated(weight, group_size=3, activation="sigmoid")
 
-        with mock.patch.object(self.common, "_is_npu_tensor", return_value=True):
-            actual = module(x, gate)
+        actual = module(x, gate)
 
         grouped_x = x.float().reshape(2, 2, 3)
         variance = grouped_x.pow(2).mean(dim=-1, keepdim=True)

@@ -1,4 +1,4 @@
-"""Device dispatch for Qwen3.5 recurrent Gated-DeltaNet decode."""
+"""Ascend implementation of Qwen3.5 recurrent Gated-DeltaNet decode."""
 
 from __future__ import annotations
 
@@ -6,13 +6,7 @@ from typing import Optional
 
 import torch
 
-from rtp_llm.models_py.ascendc_kernels.linear_attention import l2norm_fwd
-
-_NPU_DEVICE_TYPES = frozenset(("npu", "privateuseone"))
-
-
-def _is_npu_tensor(tensor: torch.Tensor) -> bool:
-    return tensor.device.type in _NPU_DEVICE_TYPES
+from rtp_llm.models_py.kernels.ascend.linear_attention import l2norm_fwd
 
 
 def _get_ascendc_ops():
@@ -128,27 +122,6 @@ def fused_recurrent_gated_delta_rule(
     sequence_lengths: Optional[torch.Tensor] = None,
     use_qk_l2norm_in_kernel: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    if not _is_npu_tensor(q):
-        from rtp_llm.models_py.triton_kernels.fla.fused_recurrent import (
-            fused_recurrent_gated_delta_rule as triton_fused_recurrent,
-        )
-
-        return triton_fused_recurrent(
-            q=q,
-            k=k,
-            v=v,
-            g=g,
-            beta=beta,
-            scale=scale,
-            initial_state=initial_state,
-            inplace_final_state=inplace_final_state,
-            cu_seqlens=cu_seqlens,
-            block_map=block_map,
-            seq_size_per_block=seq_size_per_block,
-            sequence_lengths=sequence_lengths,
-            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
-        )
-
     if cu_seqlens is not None:
         raise NotImplementedError(
             "cu_seqlens is a prefill interface; Ascend recurrent decode uses "

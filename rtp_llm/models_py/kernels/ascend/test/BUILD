@@ -4,12 +4,19 @@ requirement(["torch"])
 
 _DEPS = [
     ":torch",
-    "//rtp_llm/models_py:ascendc_kernels",
+    "//rtp_llm/models_py/kernels/ascend:qwen3_next_ops",
 ]
 
 py_test(
     name = "block_test",
     srcs = ["test_block.py"],
+    deps = _DEPS,
+)
+
+py_test(
+    name = "backend_selection_test",
+    srcs = ["test_backend_selection.py"],
+    data = ["//rtp_llm/models_py:qwen3_next_source"],
     deps = _DEPS,
 )
 

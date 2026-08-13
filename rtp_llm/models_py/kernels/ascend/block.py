@@ -1,11 +1,5 @@
 import torch
 
-_NPU_DEVICE_TYPES = {"npu", "privateuseone"}
-
-
-def _is_npu_device(device: torch.device) -> bool:
-    return device.type in _NPU_DEVICE_TYPES
-
 
 def _load_initial_state_from_block_map_npu(
     prefix_lengths: torch.Tensor,
@@ -65,28 +59,12 @@ def load_initial_state_from_block_map(
     seq_size_per_block: int,
     block_v: int = 64,
 ):
-    if _is_npu_device(initial_states.device):
-        return _load_initial_state_from_block_map_npu(
-            prefix_lengths,
-            block_map,
-            conv_states,
-            initial_states,
-            seq_size_per_block,
-        )
-
-    # Triton is unavailable in Ascend-only environments, so importing the
-    # existing implementation must remain strictly behind backend dispatch.
-    from rtp_llm.models_py.triton_kernels.fla.block import (
-        load_initial_state_from_block_map as triton_load_initial_state,
-    )
-
-    return triton_load_initial_state(
+    return _load_initial_state_from_block_map_npu(
         prefix_lengths,
         block_map,
         conv_states,
         initial_states,
         seq_size_per_block,
-        block_v,
     )
 
 
@@ -203,23 +181,7 @@ def store_ssm_state_to_block_map(
     chunk_size: int,
     block_v: int = 64,
 ):
-    if _is_npu_device(ssm_states.device):
-        return _store_ssm_state_to_block_map_npu(
-            h,
-            final_states,
-            prefix_lengths,
-            cu_seqlens,
-            block_map,
-            ssm_states,
-            seq_size_per_block,
-            chunk_size,
-        )
-
-    from rtp_llm.models_py.triton_kernels.fla.block import (
-        store_ssm_state_to_block_map as triton_store_ssm_state,
-    )
-
-    return triton_store_ssm_state(
+    return _store_ssm_state_to_block_map_npu(
         h,
         final_states,
         prefix_lengths,
@@ -228,5 +190,4 @@ def store_ssm_state_to_block_map(
         ssm_states,
         seq_size_per_block,
         chunk_size,
-        block_v,
     )

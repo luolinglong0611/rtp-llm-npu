@@ -1,14 +1,16 @@
 # Qwen3.5 Ascend 算子接入
 
-Qwen3.5 线性注意力通过 `rtp_llm.models_py.ascendc_kernels` 统一分发：
+Qwen3.5 保留共享模型定义，并在 `model_desc/qwen3_next.py` 中选择后端实现：
 
-- CUDA/ROCm 输入惰性调用原有 Triton 实现；
-- Ascend NPU 输入优先调用 `fla_npu.ops.ascendc`；
+- 非 Ascend 后端继续导入原有 Triton 实现；
+- Ascend 导入 `rtp_llm.models_py.kernels.ascend`，该目录只包含 Ascend 实现，
+  并仅在 `using_ascend` 构建分支中引入；
+- chunk/recurrent/causal-conv 算子调用 `fla_npu.ops.ascendc`；
 - GDN gating、gated RMSNorm、block-map 搬运使用 torch_npu 可执行的 PyTorch 算子；
 - L2Norm 优先调用 FLA Triton-for-Ascend，未安装该可选模块时使用等价 PyTorch 实现。
 
-包装层保持模型现有调用点的函数签名和返回布局，因此模型层只需从
-统一入口导入。Ascend recurrent decode 当前只支持模型生产路径使用的
+Ascend 实现保持模型现有调用点的函数签名和返回布局，内部不再判断设备或回退到
+CUDA/ROCm。Ascend recurrent decode 当前只支持模型生产路径使用的
 `inplace_final_state=True`；其他模式会显式报错，不会静默产生形状不兼容的状态。
 
 ## 环境准备
@@ -60,7 +62,7 @@ FLA-NPU 的 Python 入口仍在演进；若预检缺少 recurrent 或其他符�
 
 ```bash
 python -m unittest discover \
-  -s rtp_llm/models_py/ascendc_kernels/test \
+  -s rtp_llm/models_py/kernels/ascend/test \
   -p 'test_*.py' -v
 ```
 
@@ -78,7 +80,7 @@ cache、跨 block、多 batch 单 token decode 和 target verify。单算子 gol
 长序列端到端精度验证。
 
 当前 recurrent AscendC 算子仅支持 BF16 state，单序列一次最多 8 个 decode token；
-# NPU graph、context parallel 和 MoE grouped-GEMM 不在本阶段验收范围内。已验
+NPU graph、context parallel 和 MoE grouped-GEMM 不在本阶段验收范围内。已验
 wheel 后，还必须对 B>1、T=2..8 核对 `actual_seq_lengths`、
 `num_accepted_tokens` 默认行为和每个 token 的 state page 快照；FLA-NPU 不同
 commit 的 Python/ACLNN 契约仍在演进。

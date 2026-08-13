@@ -2,8 +2,6 @@ import ast
 import importlib.util
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
-from unittest import mock
 
 BLOCK_PATH = Path(__file__).resolve().parents[1] / "block.py"
 
@@ -16,22 +14,10 @@ class BlockStaticTest(unittest.TestCase):
     def test_module_is_valid_python(self):
         compile(_source_tree(), str(BLOCK_PATH), "exec")
 
-    def test_triton_fallbacks_are_lazy(self):
-        eager_imports = [
-            node
-            for node in _source_tree().body
-            if isinstance(node, (ast.Import, ast.ImportFrom))
-        ]
-        imported_modules = []
-        for node in eager_imports:
-            if isinstance(node, ast.Import):
-                imported_modules.extend(alias.name for alias in node.names)
-            else:
-                imported_modules.append(node.module or "")
-
-        self.assertFalse(
-            any("triton" in module for module in imported_modules), imported_modules
-        )
+    def test_module_is_ascend_only(self):
+        source = BLOCK_PATH.read_text(encoding="utf-8")
+        self.assertNotIn("triton", source)
+        self.assertNotIn("_is_npu_device", source)
 
     def test_public_signatures_match_triton_implementation(self):
         function_names = {
@@ -76,32 +62,6 @@ def store_ssm_state_to_block_map(
         }
         self.assertEqual(actual, expected)
 
-    def test_npu_dispatch_accepts_both_device_names(self):
-        tree = _source_tree()
-        dispatch_nodes = [
-            node
-            for node in tree.body
-            if (
-                isinstance(node, ast.Assign)
-                and any(
-                    isinstance(target, ast.Name) and target.id == "_NPU_DEVICE_TYPES"
-                    for target in node.targets
-                )
-            )
-            or (isinstance(node, ast.FunctionDef) and node.name == "_is_npu_device")
-        ]
-        namespace = {"torch": SimpleNamespace(device=object)}
-        dispatch_module = ast.fix_missing_locations(
-            ast.Module(body=dispatch_nodes, type_ignores=[])
-        )
-        exec(compile(dispatch_module, str(BLOCK_PATH), "exec"), namespace)
-        is_npu_device = namespace["_is_npu_device"]
-
-        self.assertTrue(is_npu_device(SimpleNamespace(type="npu")))
-        self.assertTrue(is_npu_device(SimpleNamespace(type="privateuseone")))
-        self.assertFalse(is_npu_device(SimpleNamespace(type="cuda")))
-        self.assertFalse(is_npu_device(SimpleNamespace(type="cpu")))
-
 
 try:
     import torch
@@ -128,14 +88,13 @@ class BlockTest(unittest.TestCase):
         initial_states = torch.full((2, 2, 3, 2), -1.0, dtype=torch.float32)
         storage_pointer = initial_states.data_ptr()
 
-        with mock.patch.object(self.block, "_is_npu_device", return_value=True):
-            result = self.block.load_initial_state_from_block_map(
-                prefix_lengths,
-                block_map,
-                conv_states,
-                initial_states,
-                seq_size_per_block=4,
-            )
+        result = self.block.load_initial_state_from_block_map(
+            prefix_lengths,
+            block_map,
+            conv_states,
+            initial_states,
+            seq_size_per_block=4,
+        )
 
         self.assertIsNone(result)
         self.assertEqual(initial_states.data_ptr(), storage_pointer)
@@ -163,17 +122,16 @@ class BlockTest(unittest.TestCase):
                 ssm_states = cache_storage[:, :6].view(7, 1, 3, 2)
                 storage_pointer = ssm_states.data_ptr()
 
-                with mock.patch.object(self.block, "_is_npu_device", return_value=True):
-                    result = self.block.store_ssm_state_to_block_map(
-                        h,
-                        final_states,
-                        prefix_lengths,
-                        cu_seqlens,
-                        block_map,
-                        ssm_states,
-                        seq_size_per_block=4,
-                        chunk_size=2,
-                    )
+                result = self.block.store_ssm_state_to_block_map(
+                    h,
+                    final_states,
+                    prefix_lengths,
+                    cu_seqlens,
+                    block_map,
+                    ssm_states,
+                    seq_size_per_block=4,
+                    chunk_size=2,
+                )
 
                 self.assertIsNone(result)
                 self.assertEqual(ssm_states.data_ptr(), storage_pointer)
@@ -202,17 +160,16 @@ class BlockTest(unittest.TestCase):
     def test_store_skips_non_positive_physical_block(self):
         ssm_states = torch.full((1, 1, 1, 1), -1.0, dtype=torch.float32)
 
-        with mock.patch.object(self.block, "_is_npu_device", return_value=True):
-            self.block.store_ssm_state_to_block_map(
-                torch.zeros((1, 1, 1, 1), dtype=torch.float32),
-                torch.full((1, 1, 1, 1), 9.0, dtype=torch.float32),
-                torch.tensor([0], dtype=torch.int32),
-                torch.tensor([0, 1], dtype=torch.int32),
-                torch.tensor([[0]], dtype=torch.int32),
-                ssm_states,
-                seq_size_per_block=4,
-                chunk_size=2,
-            )
+        self.block.store_ssm_state_to_block_map(
+            torch.zeros((1, 1, 1, 1), dtype=torch.float32),
+            torch.full((1, 1, 1, 1), 9.0, dtype=torch.float32),
+            torch.tensor([0], dtype=torch.int32),
+            torch.tensor([0, 1], dtype=torch.int32),
+            torch.tensor([[0]], dtype=torch.int32),
+            ssm_states,
+            seq_size_per_block=4,
+            chunk_size=2,
+        )
 
         torch.testing.assert_close(ssm_states, torch.full_like(ssm_states, -1.0))
 
@@ -220,20 +177,19 @@ class BlockTest(unittest.TestCase):
         h = torch.zeros((1, 1, 1, 1), dtype=torch.bfloat16)
         final_states = torch.zeros((1, 1, 1, 1), dtype=torch.float32)
 
-        with mock.patch.object(self.block, "_is_npu_device", return_value=True):
-            with self.assertRaisesRegex(
-                AssertionError, "h and final_states must be float32"
-            ):
-                self.block.store_ssm_state_to_block_map(
-                    h,
-                    final_states,
-                    torch.tensor([0], dtype=torch.int32),
-                    torch.tensor([0, 1], dtype=torch.int32),
-                    torch.tensor([[1]], dtype=torch.int32),
-                    torch.zeros((2, 1, 1, 1), dtype=torch.float32),
-                    seq_size_per_block=4,
-                    chunk_size=2,
-                )
+        with self.assertRaisesRegex(
+            AssertionError, "h and final_states must be float32"
+        ):
+            self.block.store_ssm_state_to_block_map(
+                h,
+                final_states,
+                torch.tensor([0], dtype=torch.int32),
+                torch.tensor([0, 1], dtype=torch.int32),
+                torch.tensor([[1]], dtype=torch.int32),
+                torch.zeros((2, 1, 1, 1), dtype=torch.float32),
+                seq_size_per_block=4,
+                chunk_size=2,
+            )
 
 
 if __name__ == "__main__":

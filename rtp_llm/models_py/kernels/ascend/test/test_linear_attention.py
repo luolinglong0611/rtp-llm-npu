@@ -25,6 +25,24 @@ class TestLinearAttentionWithoutRuntimeDependencies(unittest.TestCase):
                 names.append(node.module or "")
         self.assertFalse(any("triton" in name or "fla_npu" in name for name in names))
 
+    def test_head_first_uses_not_implemented_error(self):
+        tree = ast.parse(MODULE_PATH.read_text(encoding="utf-8"))
+        chunk_function = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "chunk_gated_delta_rule"
+        )
+        raised_errors = [
+            node.exc.func.id
+            for node in ast.walk(chunk_function)
+            if isinstance(node, ast.Raise)
+            and isinstance(node.exc, ast.Call)
+            and isinstance(node.exc.func, ast.Name)
+        ]
+        self.assertIn("NotImplementedError", raised_errors)
+        self.assertNotIn("DeprecationWarning", raised_errors)
+
 
 try:
     import torch
@@ -44,9 +62,7 @@ class TestLinearAttentionTorch(unittest.TestCase):
 
     def test_torch_l2norm_fallback_matches_rtp_formula(self):
         x = torch.randn(2, 3, 8, dtype=torch.float32)
-        with mock.patch.object(
-            self.module, "_is_npu_tensor", return_value=True
-        ), mock.patch.object(self.module, "_get_npu_l2norm", return_value=None):
+        with mock.patch.object(self.module, "_get_npu_l2norm", return_value=None):
             actual = self.module.l2norm_fwd(x, eps=1e-6)
         expected = x * torch.rsqrt((x * x).sum(dim=-1, keepdim=True) + 1e-6)
         torch.testing.assert_close(actual, expected)
@@ -72,9 +88,7 @@ class TestLinearAttentionTorch(unittest.TestCase):
         beta = torch.arange(16, dtype=torch.float32).reshape(1, 4, 4)
         g = beta + 100
         cu = torch.tensor([0, 4], dtype=torch.int32)
-        with mock.patch.object(
-            self.module, "_is_npu_tensor", return_value=True
-        ), mock.patch.object(self.module, "_get_ascendc_ops", return_value=fake):
+        with mock.patch.object(self.module, "_get_ascendc_ops", return_value=fake):
             out = self.module.chunk_scaled_dot_kkt_fwd(
                 k, beta, g_cumsum=g, cu_seqlens=cu
             )
@@ -102,12 +116,15 @@ class TestLinearAttentionTorch(unittest.TestCase):
 
         fake = FakeOps()
         A = torch.randn(1, 4, 2, 16, dtype=torch.float32)
-        with mock.patch.object(
-            self.module, "_is_npu_tensor", return_value=True
-        ), mock.patch.object(self.module, "_get_ascendc_ops", return_value=fake):
+        with mock.patch.object(self.module, "_get_ascendc_ops", return_value=fake):
             out = self.module.solve_tril(A, output_dtype=torch.float32)
         self.assertEqual(fake.dtype, torch.float16)
         self.assertEqual(out.dtype, torch.float32)
+
+    def test_chunk_interface_rejects_head_first_layout(self):
+        q = torch.zeros((1, 1, 1, 1), dtype=torch.float16)
+        with self.assertRaisesRegex(NotImplementedError, "head_first=True"):
+            self.module.chunk_gated_delta_rule(q, q, q, q, q, head_first=True)
 
 
 if __name__ == "__main__":

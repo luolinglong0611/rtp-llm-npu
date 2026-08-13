@@ -1,8 +1,7 @@
-"""Device-dispatched causal convolution wrappers.
+"""Ascend causal convolution wrappers for Qwen3.5.
 
 The Ascend implementation adapts RTP-LLM's paged convolution cache to the
-layout expected by ``fla_npu``.  Importing this module does not import Triton;
-the existing implementation is loaded only when a non-NPU tensor is used.
+layout expected by ``fla_npu``.
 """
 
 from __future__ import annotations
@@ -13,7 +12,6 @@ from typing import Optional, Union
 import torch
 
 PAD_SLOT_ID = -1
-_NPU_DEVICE_TYPES = ("npu", "privateuseone")
 
 
 @dataclass
@@ -21,30 +19,12 @@ class CausalConv1dMetadata:
     """Metadata compatible with the legacy Triton causal-convolution API.
 
     AscendC does not need the Triton launch metadata, so all three fields are
-    empty for an NPU request.  Non-NPU requests return the legacy metadata
-    object unchanged.
+    empty for an NPU request.
     """
 
     batch_ptr: torch.Tensor
     token_chunk_offset_ptr: torch.Tensor
     total: int
-
-
-def _is_npu_tensor(tensor) -> bool:
-    return tensor.device.type in _NPU_DEVICE_TYPES
-
-
-def _is_npu_device(device) -> bool:
-    device_type = getattr(device, "type", str(device).split(":", 1)[0])
-    return device_type in _NPU_DEVICE_TYPES
-
-
-def _load_triton_impl():
-    import importlib
-
-    return importlib.import_module(
-        "rtp_llm.models_py.triton_kernels.causal_conv1d.causal_conv1d"
-    )
 
 
 def _load_npu_causal_conv1d():
@@ -96,20 +76,10 @@ def prepare_causal_conv1d_metadata(
     query_start_loc: torch.Tensor,
     device: torch.device,
 ) -> CausalConv1dMetadata:
-    """Prepare launch metadata, or a no-op placeholder on an NPU."""
+    """Return the no-op launch metadata expected by the shared model."""
 
-    if _is_npu_tensor(query_start_loc) or _is_npu_device(device):
-        empty = torch.empty(0, dtype=torch.int32, device=device)
-        return CausalConv1dMetadata(empty, empty, 0)
-    legacy = _load_triton_impl().prepare_causal_conv1d_metadata(
-        query_start_loc=query_start_loc,
-        device=device,
-    )
-    return CausalConv1dMetadata(
-        legacy.batch_ptr,
-        legacy.token_chunk_offset_ptr,
-        legacy.total,
-    )
+    empty = torch.empty(0, dtype=torch.int32, device=device)
+    return CausalConv1dMetadata(empty, empty, 0)
 
 
 def _gather_prefill_states(
@@ -215,22 +185,6 @@ def causal_conv1d_fn(
 ):
     """Run varlen causal convolution and update the paged cache in place."""
 
-    if not _is_npu_tensor(x):
-        return _load_triton_impl().causal_conv1d_fn(
-            x=x,
-            weight=weight,
-            bias=bias,
-            conv_states=conv_states,
-            query_start_loc=query_start_loc,
-            block_map=block_map,
-            prefix_lengths=prefix_lengths,
-            seq_size_per_block=seq_size_per_block,
-            activation=activation,
-            pad_slot_id=pad_slot_id,
-            metadata=metadata,
-            validate_data=validate_data,
-        )
-
     if x.dim() != 2 or weight.dim() != 2:
         raise ValueError("NPU prefill expects x=(dim, tokens), weight=(dim, width)")
     if seq_size_per_block <= 0:
@@ -308,24 +262,6 @@ def causal_conv1d_update(
     validate_data=False,
 ):
     """Decode one or more tokens while preserving RTP-LLM's paged state."""
-
-    if not _is_npu_tensor(x):
-        return _load_triton_impl().causal_conv1d_update(
-            x=x,
-            conv_state=conv_state,
-            weight=weight,
-            bias=bias,
-            activation=activation,
-            cache_seqlens=cache_seqlens,
-            block_map=block_map,
-            seq_size_per_block=seq_size_per_block,
-            sequence_lengths=sequence_lengths,
-            query_start_loc=query_start_loc,
-            max_query_len=max_query_len,
-            pad_slot_id=pad_slot_id,
-            metadata=metadata,
-            validate_data=validate_data,
-        )
 
     if seq_size_per_block <= 0:
         raise ValueError("seq_size_per_block must be positive")
