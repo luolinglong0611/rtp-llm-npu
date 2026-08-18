@@ -1,7 +1,5 @@
-"""Ascend MoE strategies"""
+"""Ascend MoE strategies."""
 
-from .pytorch_fallback import AscendBf16FallbackStrategy
+from .cann import AscendCannStrategy
 
-__all__ = [
-    "AscendBf16FallbackStrategy",
-]
+__all__ = ["AscendCannStrategy"]

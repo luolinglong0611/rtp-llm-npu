@@ -149,7 +149,8 @@ py_library(
             ":modules_rocm"
         ],
         "@//:using_ascend": [
-            ":modules_ascend"
+            ":modules_ascend",
+            "//rtp_llm/models_py/modules/factory/fused_moe/impl/ascend:ascend_moe",
         ],
         "//conditions:default": [],
     }),
