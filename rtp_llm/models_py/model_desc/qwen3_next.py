@@ -474,9 +474,15 @@ class Qwen3NextAttention(CausalAttention):
         weights: Dict[str, torch.Tensor],
         layernorm_eps: float,
         quant_config: Optional[object] = None,
+        layer_idx: int = 0,
     ):
         super().__init__(
-            attn_config, parallelism_config, weights, layernorm_eps, quant_config
+            attn_config,
+            parallelism_config,
+            weights,
+            layernorm_eps,
+            quant_config,
+            layer_idx=layer_idx,
         )
         # maybe fuse gate in qkv_proj later
         self.gate = LinearFactory.create_linear_from_weights(
@@ -783,12 +789,15 @@ class Qwen3NextDecoderLayer(nn.Module):
             attn_configs = config.getAttentionConfigs(
                 parallelism_config.get_attn_tp_size()
             )
+            # layer_idx must reach CausalAttention: hybrid models pick the KV
+            # cache group (and thus the block table / slot mapping) by layer.
             self.self_attn = Qwen3NextAttention(
                 attn_configs,
                 parallelism_config,
                 weights,
                 config.layernorm_eps,
                 config.quant_config,
+                layer_idx=layer_idx,
             )
 
         if config.moe_style == 2:
