@@ -133,8 +133,10 @@ def fused_recurrent_gated_delta_rule(
         raise NotImplementedError(
             "Ascend recurrent decode currently requires inplace_final_state=True"
         )
-    if initial_state.dtype != torch.bfloat16:
-        raise TypeError("FLA-NPU recurrent state currently requires bfloat16")
+    if initial_state.dtype not in (torch.bfloat16, torch.float32):
+        raise TypeError(
+            "FLA-NPU recurrent state must be bfloat16 or float32"
+        )
     if q.ndim != 4 or k.shape != q.shape or v.ndim != 4:
         raise ValueError("q/k/v must have shapes [B,T,H,D]")
     batch, token_count = q.shape[:2]

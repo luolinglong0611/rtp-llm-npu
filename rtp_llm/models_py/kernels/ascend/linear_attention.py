@@ -259,6 +259,11 @@ def chunk_gated_delta_rule_fwd_h(
     value_heads, value_dim = u.shape[-2:]
     cu = _canonical_cu_seqlens(cu_seqlens, batch, seqlen)
     chunk_indices = _prepare_chunk_indices(cu, chunk_size)
+    # States are K-first ([N, HV, DK, DV]) throughout this interface:
+    # load_initial_state_from_block_map transposes the V-first paged cache into
+    # this layout, chunk_fwd_o consumes h in it, and store_ssm_state_to_block_map
+    # transposes back on the way out.  Keep the kernel default (state_v_first
+    # False) so all four agree -- DK == DV would otherwise hide a transpose.
     if initial_state is None:
         initial_state = torch.zeros(
             batch if cu is None else len(cu) - 1,
@@ -406,7 +411,12 @@ def chunk_gated_delta_rule(
         cu_seqlens=cu_seqlens,
         chunk_size=_CHUNK_SIZE,
     )
-    return o.to(q.dtype), h, final_state
+    # The AscendC fwd_h kernel emits h/final_state in bfloat16, while the
+    # block-map state store (and CUDA FLA semantics) requires float32 states.
+    final_state_out = (
+        final_state.float() if final_state is not None else None
+    )
+    return o.to(q.dtype), h.float(), final_state_out
 
 
 __all__ = [
