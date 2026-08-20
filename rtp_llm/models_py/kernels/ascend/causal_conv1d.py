@@ -219,7 +219,10 @@ def causal_conv1d_fn(
     initial_states = temporary_states.clone()
     npu_causal_conv1d = _load_npu_causal_conv1d()
     output = npu_causal_conv1d(
-        x=x_work.transpose(0, 1),
+        # x arrives as (dim, tokens); the operator reads a contiguous
+        # (tokens, dim) buffer, so materialise the transpose instead of
+        # handing it a strided view.
+        x=x_work.transpose(0, 1).contiguous(),
         weight=weight.transpose(0, 1).contiguous(),
         bias=bias,
         conv_states=temporary_states,
