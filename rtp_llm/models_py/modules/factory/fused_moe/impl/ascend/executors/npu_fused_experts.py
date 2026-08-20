@@ -170,9 +170,26 @@ class NpuFusedExpertsExecutor(FusedMoeExpertExecutor):
             group_list_type=0,
             group_list=group_list,
         )[0]
+        # npu_moe_init_routing_v2(row_idx_type=1) returns a gather index:
+        # row_idx[permuted_row] == original (token, topk) flat row.  But
+        # npu_moe_token_unpermute expects a scatter index, i.e.
+        # sorted_indices[original_row] == permuted_row.  Feeding the gather
+        # index straight through silently reshuffles tokens between rows, so
+        # invert the permutation first.
+        gather_idx = torch.abs(row_idx)
+        scatter_idx = torch.empty_like(gather_idx)
+        scatter_idx.scatter_(
+            0,
+            gather_idx.long(),
+            torch.arange(
+                gather_idx.numel(),
+                device=gather_idx.device,
+                dtype=gather_idx.dtype,
+            ),
+        )
         output = self._torch_npu.npu_moe_token_unpermute(
             permuted_tokens=expert_out,
-            sorted_indices=torch.abs(row_idx),
+            sorted_indices=scatter_idx,
             probs=topk_weights,
         )
         return CombineForwardPayload(fused_expert_output=output)
